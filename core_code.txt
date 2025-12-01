@@ -1,0 +1,519 @@
+《情景折影》核心代码与注释说明
+================================
+
+1. 三维场景与关卡数据（script/game.js）
+--------------------------------------
+
+// 场景、渲染器、相机等全局变量
+let scene;
+let renderer;
+let controls;
+let camera;
+let floorplan;
+let settings;
+let grid;
+let light;
+let monumentSquareSize;
+let monumentHeight;
+let ambient;
+let startingPosition;
+let clock = new THREE.Clock();
+let progress = [];
+let pointLights = [];
+let pointLightsZ = [];
+let isBonus = false;  // 是否为 Bonus（第二关）
+
+// 基本常量：视角、近远裁剪面、单元格大小等
+const width = window.innerWidth;
+const height = window.innerHeight;
+const aspectRatio = width/height;
+const fieldOfView = 25;
+const nearView = 1;
+const farView = 10000;
+const assetPath = '/objects/cell';
+const blockSize = 20; // 每个方块边长
+
+// 用数字编码一个三维网格中的不同“方块类型”
+const TYPE_PLATFORM = 'platform'; // 可行走平台，用于寻路/点击判定
+const CELL_BLANK = 0;   // 空
+const CELL_BLOCK = 1;   // 实心方块
+const CELL_TAIL  = 2;   // 终点“尾巴”造型
+const CELL_STAIRS = 3;  // 楼梯
+const CELL_LIGHT = 4;   // 发光点（引导玩家）
+const CELL_PILLAR = 5;  // 柱子
+
+// 游戏初始化：创建场景、相机、灯光、控制器，并根据 floorplan 渲染所有方块
+const initGame = async () => {
+  grid = floorplan[0][0].length;
+  monumentSquareSize = blockSize * grid;
+  monumentHeight = blockSize * floorplan.length;
+
+  // 1. 创建场景和渲染器
+  scene = new THREE.Scene();
+  renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(width, height);
+  renderer.setClearColor(0x373a6a);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+  // 2. 创建相机并设定位置
+  camera = new THREE.PerspectiveCamera(fieldOfView, aspectRatio, nearView, farView);
+  camera.position.set(700, -700, 700);
+  camera.up = new THREE.Vector3(0, 0, 1);
+
+  // 3. 环境光与主光源
+  light = new THREE.PointLight(`rgb(${settings.globalLight})`, 5, 1100);
+  light.position.set(600, -200, 250 + monumentHeight);
+  light.castShadow = true;
+  ambient = new THREE.AmbientLight(`rgb(${settings.ambientLight})`);
+  scene.add(light, ambient);
+
+  // 4. 轨道相机控制（OrbitControls）
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.minPolarAngle = Math.PI/2 - 0.5;
+  controls.maxPolarAngle = Math.PI/2 - 0.5;
+  controls.zoomSpeed = 0.3;
+  controls.minDistance = 500;
+  controls.maxDistance = 2000;
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.2;
+  controls.autoRotate = true;      // 默认自动旋转展示关卡
+  controls.autoRotateSpeed = -2;
+
+  document.body.appendChild(renderer.domElement);
+
+  // 5. 根据 floorplan 三维数组生成几何体
+  floorplanRenderer();
+  resizeListener();
+  mouseListener();
+};
+
+// 三维数组 floorplan -> 三维场景中的 Cube / Shape / Light
+const floorplanRenderer = () => {
+  let platform = Math.floor(data.floorplan.length / 2);
+  let zPos = -monumentSquareSize - settings.offsetY;
+  let yPos = 0;
+  let xPos = 0;
+
+  for (let z = 0; z < floorplan.length; z++) {
+    let reversedZ = floorplan.length - (z + 1);
+    zPos += blockSize;
+    xPos = monumentSquareSize / 2;
+
+    for (let x = 0; x < floorplan[reversedZ].length; x++) {
+      let reversedX = floorplan[reversedZ].length - (x + 1);
+      xPos -= blockSize;
+      yPos = monumentSquareSize / 2;
+
+      for (let y = 0; y < floorplan[reversedZ][reversedX].length; y++) {
+        let reversedY = floorplan[reversedZ][reversedX].length - (y + 1);
+        let cell = floorplan[reversedZ][reversedX][reversedY];
+        let upperCell = reversedZ-1 >= 0 && reversedZ-1 <= floorplan.length ? floorplan[reversedZ-1][reversedX][reversedY] : 0;
+
+        // isPlatform 决定是否可以行走，用于寻路
+        let isPlatform =
+          (cell === CELL_BLOCK) &&
+          (upperCell === CELL_BLANK || upperCell === CELL_PILLAR || upperCell === CELL_TAIL)
+          ? true : false;
+
+        let shape = null;
+        yPos -= blockSize;
+
+        // 根据 cell 类型实例化不同的几何体类
+        switch (cell) {
+          case CELL_BLOCK:
+            shape = new Cube(
+              xPos, yPos, zPos,
+              `rgb(${settings.cellColor})`,
+              blockSize,
+              isPlatform
+            );
+            break;
+          case CELL_TAIL:
+            shape = new Shape(
+              xPos, yPos, zPos,
+              `rgb(${settings.tail})`,
+              `${assetPath}/tail.json`,
+              1
+            );
+            break;
+          case CELL_STAIRS:
+            shape = new Shape(
+              xPos, yPos, zPos,
+              `rgb(${settings.cellColor})`,
+              `${assetPath}/stairs.json`,
+              1,
+              7.855
+            );
+            break;
+          case CELL_LIGHT:
+            shape = new Light(
+              xPos, yPos, zPos,
+              `rgb(${settings.pointLight})`,
+              settings.pointLightScale,
+              0
+            );
+            break;
+          case CELL_PILLAR:
+            shape = new Shape(
+              xPos, yPos, zPos,
+              `rgb(${settings.cellColor})`,
+              `${assetPath}/pillar.json`
+            );
+            break;
+        }
+
+        if (shape !== null) {
+          shape.render(); // 统一调用各自 render，把 mesh/光源加入 scene
+        }
+      }
+    }
+  }
+};
+
+
+2. 角色与“母亲”模型加载（script/object.js）
+-------------------------------------------
+
+// 主角加载：使用 OBJ + MTL，将模型放在地图中心起点
+var loadCharacter = async (scene) => {
+  const objLoader = new THREE.OBJLoader();
+  const mtlLoader = new THREE.MTLLoader();
+
+  objLoader.setPath('./objects/character/');
+  mtlLoader.setPath('./objects/character/');
+
+  await mtlLoader.load('character.mtl', (materials) => {
+    materials.preload();
+    objLoader.setMaterials(materials);
+    objLoader.load('character.obj', (object) => {
+      let pos = getActualPosition({
+        x: Math.ceil(data.floorplan[0].length / 2),
+        y: 0,
+        z: Math.floor(data.floorplan.length / 2)
+      });
+
+      if (isBonus) {
+        // 第二关：起点根据 bonusStage 布局重新计算
+        object.position.set(
+          Math.ceil(data.bonusStage[0].length / 2),
+          0,
+          Math.floor(data.bonusStage.length / 2)
+        );
+      } else {
+        object.position.set(pos.x, pos.y, pos.z);
+      }
+
+      object.rotation.set(0, Math.PI/2, Math.PI/2);
+      object.scale.set(0.2, 0.2, 0.2);
+
+      scene.add(object);
+      character = object; // 保存到全局，供重力、寻路等使用
+    });
+  });
+};
+
+// 母亲角色加载：与主角共用模型，通过缩放和配色来区分，并屏蔽 Raycast 以免影响点击
+var loadMother = async (scene, mapLocation) => {
+  const objLoader = new THREE.OBJLoader();
+  const mtlLoader = new THREE.MTLLoader();
+
+  objLoader.setPath('./objects/character/');
+  mtlLoader.setPath('./objects/character/');
+
+  await mtlLoader.load('character.mtl', (materials) => {
+    materials.preload();
+    objLoader.setMaterials(materials);
+    objLoader.load('character.obj', (object) => {
+      const pos = getActualPosition(mapLocation);
+      object.position.set(pos.x, pos.y, pos.z);
+
+      // 姿态不同 + 略微放大
+      object.rotation.set(Math.PI / 2, 0, 0);
+      object.scale.set(0.25, 0.25, 0.25);
+
+      // 柔和粉色并禁止 Raycast，避免影响重力/点击判定
+      object.traverse((child) => {
+        if (child.isMesh && child.material && child.material.color) {
+          child.material.color.setRGB(1.0, 0.85, 0.9);
+        }
+        if (child.isMesh && typeof child.raycast === "function") {
+          child.raycast = () => {};
+        }
+      });
+
+      scene.add(object);
+    });
+  });
+};
+
+
+3. 事件循环、第二关加载与终点判定（script/eventListener.js）
+-----------------------------------------------------------
+
+// 事件触发坐标（在 floorplan 网格中的坐标）
+const DEST_BLACKLIST = [
+  { z: 10, x: 9, y: 2 },
+  { z: 10, x: 8, y: 8 },
+  { z: 10, x: 4, y: 6 },
+  { z: 10, x: 2 , y: 10 }
+];
+
+const INTRO     = { z: 10, x: 10, y: 2 }; // 第一处光点
+const PORTFOLIO = { z: 10, x: 9,  y: 8 };
+const CONTACT   = { z: 10, x: 3,  y: 6 };
+const BONUS     = { z: 10, x: 2,  y: 9 }; // 通往第二关的终点
+
+// 母亲角色出现的位置（每关终点）
+const MOTHER_MAIN_END  = BONUS;                 // 主关终点
+const MOTHER_BONUS_END = { z: 10, x: 10, y: 2 } // Bonus 关终点
+
+
+// 主关加载：绑定 window load 事件，初始化环境并开始动画循环
+var loadListener = async () => {
+  window.addEventListener('load', async () => {
+    settings = data.settings;
+    document.body.style.background = `rgb(${settings.background})`;
+    floorplan = data.floorplan;
+
+    await initGame()
+      .then(scene.add(progress.shift()))
+      .then(await loadCharacter(scene)
+        .then(() => {
+          // 依据设定的帧率控制动画
+          fpsInterval = 1000 / settings.frameRate;
+          then = Date.now();
+          startTime = then;
+          animate();
+        }))
+      .then(async () => {
+        // 在主关终点生成“母亲”
+        await loadMother(scene, MOTHER_MAIN_END);
+      })
+      .then(() => {
+        let loadingDiv = document.getElementById('loading');
+        if (loadingDiv && loadingDiv.parentNode) {
+          loadingDiv.parentNode.removeChild(loadingDiv);
+        }
+      });
+  });
+
+  // 将三维坐标原点与 floorplan 网格对齐，用于寻路与点击映射
+  defaultMapGeometry = new THREE.Vector3(
+    0 - (Math.floor(data.floorplan[0].length / 2) * blockSize),
+    0 - (Math.floor(data.floorplan[0].length / 2) * blockSize),
+    0 + (Math.ceil(data.floorplan.length / 2) * blockSize)
+  );
+
+  // 动画循环：控制重力、角色移动、相机更新和渲染
+  const animate = () => {
+    requestAnimationFrame(animate);
+    now = Date.now();
+    elapsed = now - then;
+    if (elapsed > fpsInterval) {
+      then = now - (elapsed % fpsInterval);
+
+      applyGravity();
+      applyMovement();
+
+      if (controls) controls.update();
+      renderer.render(scene, camera);
+    }
+  };
+};
+
+
+// Bonus 关加载逻辑：与主关类似，只是使用 data.bonusStage 布局
+var loadBonusListener = async () => {
+  isBonus = true;
+  window.addEventListener('load', async () => {
+    settings = data.settings;
+    document.body.style.background = `rgb(${settings.background})`;
+    floorplan = data.bonusStage;
+
+    await initGame()
+      .then(scene.add(progress.shift()))
+      .then(await loadCharacter(scene)
+        .then(() => {
+          fpsInterval = 1000 / settings.frameRate;
+          then = Date.now();
+          startTime = then;
+          animate();
+        })
+      )
+      .then(async () => {
+        // 在 Bonus 关终点生成“母亲”
+        await loadMother(scene, MOTHER_BONUS_END);
+      });
+  });
+
+  defaultMapGeometry = new THREE.Vector3(
+    0 - (Math.floor(data.floorplan[0].length / 2) * blockSize),
+    0 - (Math.floor(data.floorplan[0].length / 2) * blockSize),
+    0 + (Math.ceil(data.floorplan.length / 2) * blockSize)
+  );
+
+  const animate = () => {
+    requestAnimationFrame(animate);
+    now = Date.now();
+    elapsed = now - then;
+    if (elapsed > fpsInterval) {
+      then = now - (elapsed % fpsInterval);
+
+      applyGravity();
+      applyMovement();
+
+      if (controls) controls.update();
+      renderer.render(scene, camera);
+    }
+  };
+};
+
+
+// 角色运动与事件触发：检测当前位置是否到达终点，并根据路径栈一步步移动
+var applyMovement = async () => {
+  let currentPos = getMapLocation(character.position);
+
+  // 逐个光点解锁 progress（光点逻辑）
+  if (currentPos.x === INTRO.x && currentPos.y === INTRO.y) {
+    if (progress.length === 3) {
+      scene.add(progress.shift());
+    }
+  } else if (currentPos.x === PORTFOLIO.x && currentPos.y === PORTFOLIO.y) {
+    if (progress.length === 2) {
+      scene.add(progress.shift());
+    }
+  } else if ((currentPos.x === CONTACT.x && currentPos.y === CONTACT.y)) {
+    if (progress.length === 1) {
+      scene.add(progress.shift());
+    }
+  } else if ((currentPos.x === BONUS.x && currentPos.y === BONUS.y)) {
+    // 到达主关终点：跳转到 Bonus（第二关）
+    if (!eventRunning) {
+      eventRunning = true;
+      window.location.href = "bonus.html";
+    }
+  } else if (!(currentPos.x === INTRO.x && currentPos.y === INTRO.y) &&
+             !(currentPos.x === PORTFOLIO.x && currentPos.y === PORTFOLIO.y) &&
+             !(currentPos.x === CONTACT.x && currentPos.y === CONTACT.y)) {
+    eventRunning = false;
+  }
+
+  // 路径栈为空则停止移动；否则根据下一个节点的实际坐标逐步移动角色
+  if (isMoving) {
+    if (path.length === 0) {
+      isMoving = false;
+      if (MOUSE_POINTED && MOUSE_POINTED.material) {
+        MOUSE_POINTED.material.color.set(`rgb(${data.settings.cellColor})`);
+      }
+    } else {
+      let next = getActualPosition(path[0]);
+
+      // 根据下一个节点判定朝向与位移方向
+      if (character.position.x > next.x) {
+        character.rotation.set(Math.PI/2, -Math.PI/2, 0);
+        character.position.set(character.position.x - MOVEMENT, character.position.y, character.position.z);
+      } else if (character.position.x < next.x) {
+        character.rotation.set(0, Math.PI/2, Math.PI/2);
+        character.position.set(character.position.x + MOVEMENT, character.position.y, character.position.z);
+      } else if (character.position.y > next.y) {
+        character.rotation.set(Math.PI/2, 0, 0);
+        character.position.set(character.position.x, character.position.y - MOVEMENT, character.position.z);
+      } else if (character.position.y < next.y) {
+        character.rotation.set(-Math.PI/2, 0, Math.PI);
+        character.position.set(character.position.x, character.position.y + MOVEMENT, character.position.z);
+      }
+
+      if (character.position.x === next.x && character.position.y === next.y) {
+        path.shift(); // 走到当前节点后将其出栈
+      }
+    }
+  }
+};
+
+
+// BFS 寻路：从当前角色所在格子到点击目标格子的最短路径
+var findPath = async (destination) => {
+  let dest = getMapLocation(destination);
+  let start = getMapLocation(character.position);
+
+  if (dest.x === start.x && dest.y === start.y) {
+    return [];
+  }
+
+  let destKey = `${dest.x}x${dest.y}`;
+  let queue = [start];
+  let parents = {};
+
+  while (queue.length > 0) {
+    let curr = queue.shift();
+    let currKey = `${curr.x}x${curr.y}`;
+
+    if (currKey === destKey) {
+      break;
+    }
+
+    let neighbors = [
+      {z: curr.z, x: curr.x - 1, y: curr.y},
+      {z: curr.z, x: curr.x + 1, y: curr.y},
+      {z: curr.z, x: curr.x,     y: curr.y - 1},
+      {z: curr.z, x: curr.x,     y: curr.y + 1}
+    ];
+
+    for (let i = 0; i < neighbors.length; i++) {
+      const tempZ = neighbors[i].z;
+      const tempX = neighbors[i].x;
+      const tempY = neighbors[i].y;
+
+      // 边界检查
+      if (tempX < 0 || tempX > data.floorplan[0].length - 1 ||
+          tempY < 0 || tempY > data.floorplan[0].length - 1) {
+        continue;
+      }
+
+      // 只能在 CELL_BLOCK（平台）上寻路
+      if (data.floorplan[tempZ][tempX][tempY] !== 1) {
+        continue;
+      }
+
+      let temp = { z: tempZ, x: tempX, y: tempY };
+      let tempKey = `${temp.x}x${temp.y}`;
+
+      if (tempKey in parents) {
+        continue;
+      }
+
+      parents[tempKey] = {
+        key: currKey,
+        platform: curr
+      };
+
+      queue.push(neighbors[i]);
+    }
+  }
+
+  // 回溯构造路径
+  let outPath = [];
+  let backword = dest;
+
+  while (backword !== start) {
+    outPath.push(backword);
+    const { key, platform } = parents[destKey];
+    backword = platform;
+    destKey = key;
+  }
+  outPath = outPath.reverse();
+
+  // 避免走到黑名单格子（如看起来是路但其实在视觉上不连通）
+  for (let i = 0; i < DEST_BLACKLIST.length; i++) {
+    if (outPath[outPath.length - 1].x === DEST_BLACKLIST[i].x &&
+        outPath[outPath.length - 1].y === DEST_BLACKLIST[i].y) {
+      outPath.pop();
+      break;
+    }
+  }
+  return outPath;
+};
+
+
